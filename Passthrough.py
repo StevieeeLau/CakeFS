@@ -10,7 +10,7 @@ class Passthrough(Operations):
     def __init__(self, root, access_level=0):
         self.root = root
         self.access_level = access_level  # Define access level: 0 = base, 1 = hidden layer, etc.
-        self.generate_decoy_file("/tmp/testdir/hidden_layer/decoy1.txt")
+        self.generate_decoy_file("/tmp/testdir/hidden_layer/decoy1.txt") # Generate decoy file
 
     # Helpers
     # =======
@@ -56,18 +56,15 @@ class Passthrough(Operations):
 
     def readdir(self, path, fh):
         full_path = self._full_path(path)
-        dirents = ['.', '..']
-        if os.path.isdir(full_path):
-            dirents.extend(os.listdir(full_path))
+        dirents = ['.', '..', 'base_file.txt']
 
-        # Add hidden layer if access level allows it
-        if self.access_level >= 1:
-            hidden_layer_path = os.path.join(self.root, 'hidden_layer')
-            if os.path.exists(hidden_layer_path):
-                dirents.append('hidden_layer')  # Only show if access level >= 1
+        if os.path.isdir(full_path):
+            if self.access_level > 0 and path == "/":
+                dirents.append('hidden_layer')
 
         for entry in dirents:
             yield entry
+
 
     # File methods
     # ============
