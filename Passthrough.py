@@ -1,17 +1,16 @@
 #!/usr/bin/env python
 
 from __future__ import with_statement
-
 import os
 import sys
 import errno
-
 from fuse import FUSE, FuseOSError, Operations
 
-
 class Passthrough(Operations):
-    def __init__(self, root):
+    def __init__(self, root, access_level=0):
         self.root = root
+        self.access_level = access_level  # Define access level: 0 = base, 1 = hidden layer, etc.
+        self.generate_decoy_file("/tmp/testdir/hidden_layer/decoy1.txt")
 
     # Helpers
     # =======
@@ -30,68 +29,45 @@ class Passthrough(Operations):
         if not os.access(full_path, mode):
             raise FuseOSError(errno.EACCES)
 
-    def chmod(self, path, mode):
-        full_path = self._full_path(path)
-        return os.chmod(full_path, mode)
-
-    def chown(self, path, uid, gid):
-        full_path = self._full_path(path)
-        return os.chown(full_path, uid, gid)
-
     def getattr(self, path, fh=None):
         full_path = self._full_path(path)
-        st = os.lstat(full_path)
-        return dict((key, getattr(st, key)) for key in ('st_atime', 'st_ctime',
-                     'st_gid', 'st_mode', 'st_mtime', 'st_nlink', 'st_size', 'st_uid'))
+        try:
+            st = os.lstat(full_path)
+        except FileNotFoundError:
+            raise FuseOSError(errno.ENOENT)
+
+        # Obfuscate metadata for hidden layer files
+        if "hidden_layer" in path and self.access_level < 1:
+            raise FuseOSError(errno.ENOENT)  # Hide hidden files if access level is insufficient
+
+        # Obfuscate metadata for files in hidden layers
+        if "hidden_layer" in path:
+            return {
+                'st_size': st.st_size + 1024,  # Fake a larger size
+                'st_mtime': st.st_mtime + 1000000,  # Alter the modification time
+                'st_mode': st.st_mode,
+                'st_uid': st.st_uid,
+                'st_gid': st.st_gid,
+                'st_atime': st.st_atime,
+                'st_ctime': st.st_ctime,
+                'st_nlink': st.st_nlink
+            }
+        return {key: getattr(st, key) for key in ('st_atime', 'st_ctime', 'st_gid', 'st_mode', 'st_mtime', 'st_nlink', 'st_size', 'st_uid')}
 
     def readdir(self, path, fh):
         full_path = self._full_path(path)
-
         dirents = ['.', '..']
         if os.path.isdir(full_path):
             dirents.extend(os.listdir(full_path))
-        for r in dirents:
-            yield r
 
-    def readlink(self, path):
-        pathname = os.readlink(self._full_path(path))
-        if pathname.startswith("/"):
-            # Path name is absolute, sanitize it.
-            return os.path.relpath(pathname, self.root)
-        else:
-            return pathname
+        # Add hidden layer if access level allows it
+        if self.access_level >= 1:
+            hidden_layer_path = os.path.join(self.root, 'hidden_layer')
+            if os.path.exists(hidden_layer_path):
+                dirents.append('hidden_layer')  # Only show if access level >= 1
 
-    def mknod(self, path, mode, dev):
-        return os.mknod(self._full_path(path), mode, dev)
-
-    def rmdir(self, path):
-        full_path = self._full_path(path)
-        return os.rmdir(full_path)
-
-    def mkdir(self, path, mode):
-        return os.mkdir(self._full_path(path), mode)
-
-    def statfs(self, path):
-        full_path = self._full_path(path)
-        stv = os.statvfs(full_path)
-        return dict((key, getattr(stv, key)) for key in ('f_bavail', 'f_bfree',
-            'f_blocks', 'f_bsize', 'f_favail', 'f_ffree', 'f_files', 'f_flag',
-            'f_frsize', 'f_namemax'))
-
-    def unlink(self, path):
-        return os.unlink(self._full_path(path))
-
-    def symlink(self, name, target):
-        return os.symlink(name, self._full_path(target))
-
-    def rename(self, old, new):
-        return os.rename(self._full_path(old), self._full_path(new))
-
-    def link(self, target, name):
-        return os.link(self._full_path(target), self._full_path(name))
-
-    def utimens(self, path, times=None):
-        return os.utime(self._full_path(path), times)
+        for entry in dirents:
+            yield entry
 
     # File methods
     # ============
@@ -106,16 +82,19 @@ class Passthrough(Operations):
 
     def read(self, path, length, offset, fh):
         os.lseek(fh, offset, os.SEEK_SET)
-        return os.read(fh, length)
+        content = os.read(fh, length)
+
+        # Obfuscate content for hidden layer files
+        if "hidden_layer" in path and self.access_level < 1:
+            raise FuseOSError(errno.ENOENT)
+        elif "hidden_layer" in path:
+            # Simple XOR obfuscation as an example
+            content = bytes([b ^ 0xAA for b in content])
+        return content
 
     def write(self, path, buf, offset, fh):
         os.lseek(fh, offset, os.SEEK_SET)
         return os.write(fh, buf)
-
-    def truncate(self, path, length, fh=None):
-        full_path = self._full_path(path)
-        with open(full_path, 'r+') as f:
-            f.truncate(length)
 
     def flush(self, path, fh):
         return os.fsync(fh)
@@ -123,12 +102,21 @@ class Passthrough(Operations):
     def release(self, path, fh):
         return os.close(fh)
 
-    def fsync(self, path, fdatasync, fh):
-        return self.flush(path, fh)
+    # Decoy File Generation
+    # =====================
+    def generate_decoy_file(self, path):
+        """Generate a decoy file with random content."""
+        with open(path, 'wb') as f:
+            f.write(os.urandom(1024))  # 1 KB of random content
 
-
-def main(mountpoint, root):
-    FUSE(Passthrough(root), mountpoint, nothreads=True, foreground=True)
+def main(mountpoint, root, access_level=0):
+    FUSE(Passthrough(root, access_level=int(access_level)), mountpoint, nothreads=True, foreground=True)
 
 if __name__ == '__main__':
-    main(sys.argv[2], sys.argv[1])
+    if len(sys.argv) < 3:
+        print("Usage: Passthrough.py <root> <mountpoint> [access_level]")
+        sys.exit(1)
+    root = sys.argv[1]
+    mountpoint = sys.argv[2]
+    access_level = sys.argv[3] if len(sys.argv) > 3 else 0
+    main(mountpoint, root, access_level)
