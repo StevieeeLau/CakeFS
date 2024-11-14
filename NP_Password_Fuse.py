@@ -10,7 +10,7 @@ class PersistentEncryptedFS(Operations):
         self.storage_file = storage_file
         self.layers = {}
         self.cipher = Fernet(encryption_key)
-        self._load_storage()
+        self._load_storage(layers)
 
         # Initialize each layer with a unique password and reset the authenticated flag
         for layer, password in layers.items():
@@ -19,14 +19,26 @@ class PersistentEncryptedFS(Operations):
             # Reset authenticated to False for each layer
             self.layers[layer]['authenticated'] = False
 
-    def _load_storage(self):
+    def _load_storage(self, defined_layers):
         # Load encrypted data from the storage file if it exists
         if os.path.exists(self.storage_file):
             with open(self.storage_file, 'rb') as f:
                 encrypted_data = f.read()
                 if encrypted_data:
                     decrypted_data = self.cipher.decrypt(encrypted_data)
-                    self.layers = pickle.loads(decrypted_data)
+                    loaded_layers = pickle.loads(decrypted_data)
+
+                    # Check for any extra layers and remove them if not defined
+                    for layer in list(loaded_layers.keys()):
+                        if layer not in defined_layers:
+                            print(f"Removing undefined layer: {layer}")
+                            del loaded_layers[layer]
+
+                    # Update self.layers with the validated layers
+                    self.layers = loaded_layers
+
+                    # Save immediately to ensure undefined layers are removed from disk
+                    self._save_storage()
 
     def _save_storage(self):
         # Save encrypted data to the storage file
@@ -169,21 +181,17 @@ class PersistentEncryptedFS(Operations):
         else:
             raise FuseOSError(errno.ENOENT)
     
-    
     def lock(self, path, cmd, fh, lock_type):
         # This method allows for successful file locking attempts
         return 0
 
-
-
 if __name__ == '__main__':
-    # Generate or use a pre-defined encryption key for the filesystem
-    encryption_key = b'0VYu46sOkMtrmPCpwQlc7XfqKIy9_NWJGMoJNKhLzqs=' # Predefined Fernet key
+    encryption_key = b'0VYu46sOkMtrmPCpwQlc7XfqKIy9_NWJGMoJNKhLzqs='  # Predefined Fernet key
     storage_file = 'encrypted_storage.db'  # Path to the encrypted storage file
 
     # Define passwords for each layer
     layers = {
-        'layer1': 'CTF1',
+        'layer': 'CTF1',
         'layer2': 'CTF2',
     }
 
