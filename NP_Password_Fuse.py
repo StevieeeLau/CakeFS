@@ -12,15 +12,12 @@ class PersistentEncryptedFS(Operations):
         self.cipher = Fernet(encryption_key)
         self._load_storage(layers)
 
-        # Initialize each layer with a unique password and reset the authenticated flag
+        # Initialize each layer with a unique password if not loaded from storage
         for layer, password in layers.items():
             if layer not in self.layers:
-                self.layers[layer] = {'password': password, 'files': {}, 'data': {}}
-            # Reset authenticated to False for each layer
-            self.layers[layer]['authenticated'] = False
+                self.layers[layer] = {'password': password, 'files': {}, 'data': {}, 'authenticated': False}
 
     def _load_storage(self, defined_layers):
-        # Load encrypted data from the storage file if it exists
         if os.path.exists(self.storage_file):
             with open(self.storage_file, 'rb') as f:
                 encrypted_data = f.read()
@@ -28,34 +25,31 @@ class PersistentEncryptedFS(Operations):
                     decrypted_data = self.cipher.decrypt(encrypted_data)
                     loaded_layers = pickle.loads(decrypted_data)
 
-                    # Check for any extra layers and remove them if not defined
+                    # Remove layers not in defined_layers and reset authentication flag only once on load
                     for layer in list(loaded_layers.keys()):
                         if layer not in defined_layers:
                             print(f"Removing undefined layer: {layer}")
                             del loaded_layers[layer]
+                        else:
+                            loaded_layers[layer]['authenticated'] = False  # Reset once
 
-                    # Update self.layers with the validated layers
                     self.layers = loaded_layers
-
-                    # Save immediately to ensure undefined layers are removed from disk
-                    self._save_storage()
+                    self._save_storage()  # Save changes to disk
 
     def _save_storage(self):
-        # Save encrypted data to the storage file
         with open(self.storage_file, 'wb') as f:
             serialized_data = pickle.dumps(self.layers)
             encrypted_data = self.cipher.encrypt(serialized_data)
             f.write(encrypted_data)
 
     def _authenticate(self, layer):
-        # Check if the layer is already authenticated
-        if self.layers[layer]['authenticated']:
+        # Only prompt if the layer hasn't been authenticated yet in this session
+        if self.layers[layer].get('authenticated'):
             return True
 
-        # Prompt for password if the layer isn't authenticated
         password = getpass(f"Enter password for {layer}: ")
         if password == self.layers[layer]['password']:
-            self.layers[layer]['authenticated'] = True
+            self.layers[layer]['authenticated'] = True  # Set authenticated to True on success
             return True
         else:
             raise FuseOSError(errno.EACCES)
@@ -64,10 +58,8 @@ class PersistentEncryptedFS(Operations):
         layer = path.split('/')[1] if '/' in path else None
         if not layer or layer not in self.layers:
             raise FuseOSError(errno.ENOENT)
-
         if path == '/' or path == f'/{layer}':
             return dict(st_mode=(0o755 | 0o040000), st_nlink=2, st_size=0)
-
         files = self.layers[layer]['files']
         if path in files:
             return files[path]
@@ -77,7 +69,7 @@ class PersistentEncryptedFS(Operations):
     def readdir(self, path, fh):
         layer = path.split('/')[1] if '/' in path else None
         if layer in self.layers:
-            self._authenticate(layer)
+            self._authenticate(layer)  # Authenticate layer if not already done
             files = self.layers[layer]['files']
             return ['.', '..'] + [x.split('/')[-1] for x in files]
         else:
@@ -91,7 +83,7 @@ class PersistentEncryptedFS(Operations):
             data = self.layers[layer]['data']
             files[path] = dict(st_mode=(mode | 0o100000), st_nlink=1, st_size=0)
             data[path] = b''
-            self._save_storage()  # Save changes to disk
+            self._save_storage()
             return 0
         else:
             raise FuseOSError(errno.ENOENT)
@@ -114,28 +106,17 @@ class PersistentEncryptedFS(Operations):
             layer_data = self.layers[layer]['data']
             layer_files = self.layers[layer]['files']
 
-            # Check if the file exists in the data dictionary
             if path not in layer_data:
                 raise FuseOSError(errno.ENOENT)
 
-            # Retrieve the current file data
             current_data = layer_data[path]
-
-            # Calculate the new data to write, accommodating the offset
             if offset > len(current_data):
-                # If offset is beyond current data length, pad with null bytes
                 current_data += b'\x00' * (offset - len(current_data))
 
-            # Insert the new data at the specified offset
             new_data = current_data[:offset] + data + current_data[offset + len(data):]
-
-            # Update the file data and file size in the filesystem
             layer_data[path] = new_data
             layer_files[path]['st_size'] = len(new_data)
-
-            # Save the updated filesystem state to the storage file
             self._save_storage()
-
             return len(data)
         else:
             raise FuseOSError(errno.ENOENT)
@@ -147,23 +128,17 @@ class PersistentEncryptedFS(Operations):
             layer_data = self.layers[layer]['data']
             if path not in layer_data:
                 raise FuseOSError(errno.ENOENT)
-            
             current_data = layer_data[path]
             if length < len(current_data):
-                # Shorten the file
                 layer_data[path] = current_data[:length]
             else:
-                # Extend the file with null bytes
                 layer_data[path] = current_data + b'\x00' * (length - len(current_data))
-            
-            # Update file size metadata
             self.layers[layer]['files'][path]['st_size'] = length
             self._save_storage()
         else:
             raise FuseOSError(errno.ENOENT)
 
     def ftruncate(self, path, length, fh=None):
-        # Call truncate with the same parameters
         self.truncate(path, length, fh)
 
     def unlink(self, path):
@@ -175,33 +150,29 @@ class PersistentEncryptedFS(Operations):
             if path in files:
                 del files[path]
                 del data[path]
-                self._save_storage()  # Save changes to disk
+                self._save_storage()
             else:
                 raise FuseOSError(errno.ENOENT)
         else:
             raise FuseOSError(errno.ENOENT)
-    
+
     def lock(self, path, cmd, fh, lock_type):
-        # This method allows for successful file locking attempts
         return 0
 
 if __name__ == '__main__':
-    encryption_key = b'0VYu46sOkMtrmPCpwQlc7XfqKIy9_NWJGMoJNKhLzqs='  # Predefined Fernet key
-    storage_file = 'encrypted_storage.db'  # Path to the encrypted storage file
+    encryption_key = b'0VYu46sOkMtrmPCpwQlc7XfqKIy9_NWJGMoJNKhLzqs='
+    storage_file = 'encrypted_storage.db'
 
-    # Define passwords for each layer
     layers = {
-        'layer': 'CTF1',
-        'layer2': 'CTF2',
+        'layer': '1',
+        'layer1': '2',
     }
 
-    # Prompt for the master password to mount
     master_password = getpass("Enter master password to mount filesystem: ")
     correct_password = "CTF"
 
     if master_password != correct_password:
         print("Incorrect password. Access denied.")
     else:
-        # Mount the filesystem
-        mountpoint = '/tmp/fuse'  # Replace with your mount point
+        mountpoint = '/tmp/fuse'
         FUSE(PersistentEncryptedFS(storage_file, layers, encryption_key), mountpoint, nothreads=True, foreground=True)
