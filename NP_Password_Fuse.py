@@ -1,21 +1,30 @@
 import os
 import errno
 import pickle
+import sys
 from fuse import FUSE, Operations, FuseOSError
 from getpass import getpass
 from cryptography.fernet import Fernet
 
 class PersistentEncryptedFS(Operations):
+    MAX_ATTEMPTS = 3  # Maximum allowed attempts before self-destruct
+
     def __init__(self, storage_file, layers, encryption_key):
         self.storage_file = storage_file
         self.layers = {}
         self.cipher = Fernet(encryption_key)
+        self.authenticated_layers = set()  # Store authenticated layers in memory
         self._load_storage(layers)
 
         # Initialize each layer with a unique password if not loaded from storage
         for layer, password in layers.items():
             if layer not in self.layers:
-                self.layers[layer] = {'password': password, 'files': {}, 'data': {}, 'authenticated': False}
+                self.layers[layer] = {
+                    'password': password,
+                    'files': {},
+                    'data': {},
+                    'attempts': 0  # Track attempts for each layer
+                }
 
     def _load_storage(self, defined_layers):
         if os.path.exists(self.storage_file):
@@ -25,16 +34,16 @@ class PersistentEncryptedFS(Operations):
                     decrypted_data = self.cipher.decrypt(encrypted_data)
                     loaded_layers = pickle.loads(decrypted_data)
 
-                    # Remove layers not in defined_layers and reset authentication flag only once on load
+                    # Ensure attempts tracking is loaded correctly
                     for layer in list(loaded_layers.keys()):
                         if layer not in defined_layers:
                             print(f"Removing undefined layer: {layer}")
                             del loaded_layers[layer]
                         else:
-                            loaded_layers[layer]['authenticated'] = False  # Reset once
+                            loaded_layers[layer].setdefault('attempts', 0)  # Ensure attempts are loaded
 
                     self.layers = loaded_layers
-                    self._save_storage()  # Save changes to disk
+                    self._save_storage()
 
     def _save_storage(self):
         with open(self.storage_file, 'wb') as f:
@@ -43,16 +52,75 @@ class PersistentEncryptedFS(Operations):
             f.write(encrypted_data)
 
     def _authenticate(self, layer):
-        # Only prompt if the layer hasn't been authenticated yet in this session
-        if self.layers[layer].get('authenticated'):
+        # Check if the layer is already authenticated in this session
+        if layer in self.authenticated_layers:
             return True
 
+        # Check if maximum attempts are reached
+        if self.layers[layer]['attempts'] >= self.MAX_ATTEMPTS:
+            print(f"Too many incorrect attempts for {layer}. Initiating self-destruct sequence.")
+            self._self_destruct()
+
+        # Prompt for the password and validate it
         password = getpass(f"Enter password for {layer}: ")
         if password == self.layers[layer]['password']:
-            self.layers[layer]['authenticated'] = True  # Set authenticated to True on success
+            # Only add to authenticated layers when the correct password is entered
+            self.authenticated_layers.add(layer)
+            self.layers[layer]['attempts'] = 0  # Reset attempts on success
             return True
         else:
+            # Increment failed attempts and save to persist across sessions
+            self.layers[layer]['attempts'] += 1
+            self._save_storage()
+            print(f"Incorrect password. Attempts remaining: {self.MAX_ATTEMPTS - self.layers[layer]['attempts']}")
             raise FuseOSError(errno.EACCES)
+
+    def getattr(self, path, fh=None):
+        layer = path.split('/')[1] if '/' in path else None
+        if not layer or layer not in self.layers:
+            raise FuseOSError(errno.ENOENT)
+        if path == '/' or path == f'/{layer}':
+            return dict(st_mode=(0o755 | 0o040000), st_nlink=2, st_size=0)
+        files = self.layers[layer]['files']
+        if path in files:
+            return files[path]
+        else:
+            raise FuseOSError(errno.ENOENT)
+
+    def readdir(self, path, fh):
+        layer = path.split('/')[1] if '/' in path else None
+        if layer in self.layers:
+            # Check if authenticated before accessing the layer
+            self._authenticate(layer)  # This will only prompt for a password once per session per layer
+            files = self.layers[layer]['files']
+            return ['.', '..'] + [x.split('/')[-1] for x in files]
+        else:
+            raise FuseOSError(errno.ENOENT)
+
+    def _self_destruct(self):
+        """Overwrites the storage file with random data and deletes it, then deletes this script."""
+        try:
+            if os.path.exists(self.storage_file):
+                # Overwrite the storage file with random data
+                file_size = os.path.getsize(self.storage_file)
+                with open(self.storage_file, 'wb') as f:
+                    f.write(os.urandom(file_size))  # Write random bytes
+
+                # Delete the storage file
+                os.remove(self.storage_file)
+                print(f"{self.storage_file} has been securely deleted.")
+
+            # Self-delete this Python script
+            script_path = __file__
+            if os.path.exists(script_path):
+                os.remove(script_path)
+                print(f"Self-destruct sequence complete. {script_path} has been deleted.")
+
+            sys.exit(1)  # Exit the program
+        except Exception as e:
+            print(f"Self-destruct failed: {e}")
+            sys.exit(1)
+
 
     def getattr(self, path, fh=None):
         layer = path.split('/')[1] if '/' in path else None
