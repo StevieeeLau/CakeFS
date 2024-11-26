@@ -331,9 +331,11 @@ class FileFragmenter:
                     if slack_space >= min_size:
                         slack_spaces.append((path, slack_space))
                 except PermissionError:
-                    continue  # Skip files without permission
+                    # Skip files without permission
+                    continue
                 except FileNotFoundError:
-                    continue  # Skip dynamic files
+                    # Skip dynamic files
+                    continue
                 except Exception as e:
                     print(f"Error analyasing {path}: {e}")
         return slack_spaces
@@ -354,7 +356,9 @@ class FileFragmenter:
 
                 # Choose a random block from the unused_blocks list
                 block = random.choice(unused_blocks)
-                unused_blocks.remove(block)  # Remove the chosen block from the list
+
+                # Remove the chosen block from the list
+                unused_blocks.remove(block)
 
                 max_offset = (block * chunk_size) - len(fragment)
                 if max_offset < 0:
@@ -364,7 +368,9 @@ class FileFragmenter:
 
                 # Open the device for raw writing
                 with open(device, 'rb+') as dev:
-                    dev.seek(block * chunk_size + offset)  # Move to the start of the block
+
+                    # Move to the start of the block
+                    dev.seek(block * chunk_size + offset)
                     dev.write(fragment)
 
                 # Record metadata for reconstruction
@@ -438,7 +444,7 @@ class FileFragmenter:
         #slack_spaces = self.find_slack_spaces(root_path, min(len(fragments[0]), chunk_size))
 
         # Embed fragments
-        print("Embedding fragments into slack spaces...")
+        print("Embedding fragments into free spaces...")
         metadata = self.embed_fragments(fragments, unused_blocks, device)
 
         # Save metadata
@@ -488,7 +494,7 @@ class FileFragmenter:
             return None
         
 
-
+    # Temp not being used
     def f_recover_file(self, mdfile, output_file):
         """Reassemble the original file using metadata."""
         try:
@@ -502,7 +508,9 @@ class FileFragmenter:
             for file_path, fragment_length in metadata:
                 try:
                     with open(file_path, 'rb') as f:
-                        f.seek(-fragment_length, os.SEEK_END)  # Read from the end
+
+                        # Read from the end
+                        f.seek(-fragment_length, os.SEEK_END)
                         fragments.append(f.read(fragment_length))
                 except Exception as e:
                     print(f"Error reading fragment from {file_path}: {e}")
@@ -524,29 +532,7 @@ class FileFragmenter:
             print(f"Error recovering file: {e}")
             return False
 
-class SecureMetadata:
-
-    @staticmethod
-    def decrypt_metadata(key, metadata_file):
-
-        try:
-            with open(metadata_file, 'rb') as f:
-                data = f.read()
-            
-            # Extract the nonce
-            nonce = data[:12] 
-            encrypted_data = data[12:]
-            aesgcm = AESGCM(key)
-            serialised_metadata = aesgcm.decrypt(nonce, encrypted_data, None)
-            return pickle.loads(serialised_metadata)
-        except FileNotFoundError:
-            print(f"Error: Metadata file '{metadata_file}' not found.")
-            return None
-        except Exception as e:
-            print(f"Error decrypting metadata: {e}")
-            return None
-
-
+# Check all the values correspond to your system
 if __name__ == '__main__':
     encryption_key = b'0VYu46sOkMtrmPCpwQlc7XfqKIy9_NWJGMoJNKhLzqs='
     aes_key = b'\x1aFD\xafrF{\xfckM\x15\xa0\xc8\x82\x9d\xfe\x85f\x1f\x98\x98\xa2AdF9o\xe4r\xed\xb1\x07'
