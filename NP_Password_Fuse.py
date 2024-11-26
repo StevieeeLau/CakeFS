@@ -5,7 +5,9 @@ import errno
 import atexit
 import pickle
 import random
+import subprocess
 
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from fuse import FUSE, Operations, FuseOSError
 from getpass import getpass
 from cryptography.fernet import Fernet
@@ -13,16 +15,16 @@ from cryptography.fernet import Fernet
 class PersistentEncryptedFS(Operations):
     MAX_ATTEMPTS = 3  # Maximum allowed attempts before self-destruct
 
-    def __init__(self, storage_file, layers, encryption_key, mdfile):
+    def __init__(self, storage_file, layers, encryption_key, mdfile, chunk_size, device, aes_key):
         self.storage_file = storage_file
         self.layers = {}
         self.cipher = Fernet(encryption_key)
         self.authenticated_layers = set()  # Store authenticated layers in memory
-        self.fragmenter = FileFragmenter(storage_file, encryption_key)
+        self.fragmenter = FileFragmenter(storage_file, encryption_key, chunk_size, aes_key)
         self._load_storage(layers)
         atexit.register(self.fragment_file_and_exit)
 
-        # Initialize each layer with a unique password if not loaded from storage
+        # Initialise each layer with a unique password if not loaded from storage
         for layer, password in layers.items():
             if layer not in self.layers:
                 self.layers[layer] = {
@@ -35,7 +37,8 @@ class PersistentEncryptedFS(Operations):
     def fragment_file_and_exit(self):
         """Fragment the encrypted file, delete it, and exit."""
 
-        self.fragmenter.execute('/')
+        self.fragmenter.execute('/', chunk_size, device)
+        
         # Securely delete the storage file
         self.secure_delete(self.storage_file)
         print("Cleanup complete. Exiting...")
@@ -53,7 +56,7 @@ class PersistentEncryptedFS(Operations):
     def _load_storage(self, defined_layers):
         if os.path.exists(mdfile):
             
-            self.fragmenter.recover_file(mdfile, "encrypted_storage.db")
+            self.fragmenter.recover_file(mdfile, device, "encrypted_storage.db")
 
             with open(self.storage_file, 'rb') as f:
                 encrypted_data = f.read()
@@ -74,8 +77,8 @@ class PersistentEncryptedFS(Operations):
 
     def _save_storage(self):
         with open(self.storage_file, 'wb') as f:
-            serialized_data = pickle.dumps(self.layers)
-            encrypted_data = self.cipher.encrypt(serialized_data)
+            serialised_data = pickle.dumps(self.layers)
+            encrypted_data = self.cipher.encrypt(serialised_data)
             f.write(encrypted_data)
 
     def _authenticate(self, layer):
@@ -255,9 +258,51 @@ class PersistentEncryptedFS(Operations):
         return 0
     
 class FileFragmenter:
-    def __init__(self, storage_file, encryption_key):
+    def __init__(self, storage_file, encryption_key, chunk_size, aes_key):
         self.storage_file = storage_file
         self.cipher = Fernet(encryption_key)
+
+    def find_unused_blocks(self, device):
+        """Find unused blocks on the filesystem."""
+        try:
+            # Run dumpe2fs and capture the output for 'Free blocks:'
+            command = f"sudo dumpe2fs {device} | grep 'Free blocks:'"
+            process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            stdout, stderr = process.communicate()
+
+            if process.returncode != 0:
+                print(f"Error running dumpe2fs: {stderr}")
+                return []
+
+            # Parse the free blocks
+            free_blocks = []
+            for line in stdout.splitlines():
+                if "Free blocks:" in line:
+                    # Extract the portion after "Free blocks:"
+                    ranges = line.split("Free blocks:")[1].strip().split(", ")
+                    for block_range in ranges:
+                        if not block_range.strip():  # Skip empty strings
+                            continue
+                        if "-" in block_range:
+                            try:
+                                # Handle ranges (e.g., "16875520-16875946")
+                                start, end = map(int, block_range.split("-"))
+                                free_blocks.extend(range(start, end + 1))
+                            except ValueError as e:
+                                print(f"Error processing range '{block_range}': {e}")
+                                continue
+                        else:
+                            try:
+                                # Handle single blocks (e.g., "16876064")
+                                free_blocks.append(int(block_range))
+                            except ValueError as e:
+                                print(f"Error processing block '{block_range}': {e}")
+                                continue
+            return free_blocks
+
+        except Exception as e:
+            print(f"Error finding unused blocks: {e}")
+            return []
 
     def encrypt_file(self):
         """Encrypt the storage file."""
@@ -266,7 +311,7 @@ class FileFragmenter:
         encrypted_data = self.cipher.encrypt(data)
         return encrypted_data
 
-    def fragment_file(self, encrypted_data, chunk_size=4):
+    def fragment_file(self, encrypted_data, chunk_size):
         """Fragment the encrypted data into chunks."""
         return [encrypted_data[i:i + chunk_size] for i in range(0, len(encrypted_data), chunk_size)]
 
@@ -290,18 +335,51 @@ class FileFragmenter:
                 except FileNotFoundError:
                     continue  # Skip dynamic files
                 except Exception as e:
-                    print(f"Error analyzing {path}: {e}")
+                    print(f"Error analyasing {path}: {e}")
         return slack_spaces
 
     def get_block_size(self, path):
         """Get the block size of the file system."""
         statvfs = os.statvfs(path)
         return statvfs.f_bsize
+    
+    def embed_fragments(self, fragments, unused_blocks, device):
+        """Embed fragments into unused slack space."""
+        metadata = []
 
-    def embed_fragments(self, fragments, slack_spaces):
+        try:
+            for fragment in fragments:
+                if not unused_blocks:
+                    raise ValueError("Not enough unused blocks to embed all fragments.")
+
+                # Choose a random block from the unused_blocks list
+                block = random.choice(unused_blocks)
+                unused_blocks.remove(block)  # Remove the chosen block from the list
+
+                max_offset = (block * chunk_size) - len(fragment)
+                if max_offset < 0:
+                    raise ValueError(f"Fragment size {len(fragment)} exceeds chunk size {chunk_size}.")
+                
+                offset = random.randint(0, max_offset)
+
+                # Open the device for raw writing
+                with open(device, 'rb+') as dev:
+                    dev.seek(block * chunk_size + offset)  # Move to the start of the block
+                    dev.write(fragment)
+
+                # Record metadata for reconstruction
+                metadata.append((block, len(fragment), offset))
+
+        except Exception as e:
+            print(f"Error writing fragments to unused blocks: {e}")
+        return metadata
+
+    def f_embed_fragments(self, fragments, slack_spaces):
         """Embed fragments into slack spaces."""
         metadata = []
-        random.shuffle(slack_spaces)  # Randomize order to increase difficulty for forensic analysis
+
+        # Randomise order to increase difficulty for forensic analysis
+        random.shuffle(slack_spaces)
 
         for fragment in fragments:
             if not slack_spaces:
@@ -324,40 +402,100 @@ class FileFragmenter:
 
         return metadata
 
-    def save_metadata(self, metadata, metadata_file="metadata.pkl"):
+    def save_metadata(self, metadata):
         """Save metadata to reconstruct the fragments."""
-        with open(metadata_file, 'wb') as f:
-            pickle.dump(metadata, f)
-        print(f"Metadata saved to {metadata_file}.")
+        
+        aesgcm = AESGCM(aes_key)
 
-    def execute(self, root_path):
+        # Generate a 12-byte nonce
+        nonce = os.urandom(12)
+        serialised_metadata = pickle.dumps(metadata)
+        encrypted_data = aesgcm.encrypt(nonce, serialised_metadata, None)
+
+        with open(mdfile, 'wb') as f:
+
+            # Save nonce and encrypted data together
+            f.write(nonce + encrypted_data)  
+        print(f"Metadata securely saved to {mdfile}.")
+
+    def execute(self, root_path, chunk_size, device):
         """Encrypt, fragment, and embed the storage file."""
+
         # Encrypt the file
-        print("Encrypting the storage file...")
+        print("\nEncrypting the storage file...")
         encrypted_data = self.encrypt_file()
 
         # Fragment the file
         print("Fragmenting the encrypted file...")
-        fragments = self.fragment_file(encrypted_data)
+        fragments = self.fragment_file(encrypted_data, chunk_size)
+
+        # Find unused blocks
+        print("Finding unused blocks...")
+        unused_blocks = self.find_unused_blocks("/dev/sda1")
 
         # Find slack spaces
-        print("Finding suitable slack spaces...")
-        slack_spaces = self.find_slack_spaces(root_path, min(len(fragments[0]), 4))
+        #print("Finding suitable slack spaces...")
+        #slack_spaces = self.find_slack_spaces(root_path, min(len(fragments[0]), chunk_size))
 
         # Embed fragments
         print("Embedding fragments into slack spaces...")
-        metadata = self.embed_fragments(fragments, slack_spaces)
+        metadata = self.embed_fragments(fragments, unused_blocks, device)
 
         # Save metadata
         self.save_metadata(metadata)
 
-    def recover_file(self, metadata_file="metadata.pkl", output_file="recovered_file.db"):
+    def recover_file(self, mdfile, device, output_file):
+        """Reassemble the original file using metadata."""
+
+        try:
+            with open(mdfile, 'rb') as f:
+                data = f.read()
+                
+                # Extract the nonce
+                nonce = data[:12] 
+                encrypted_data = data[12:]
+                aesgcm = AESGCM(aes_key)
+                serialised_metadata = aesgcm.decrypt(nonce, encrypted_data, None)
+                metadata = pickle.loads(serialised_metadata)
+                print(f"Loaded metadata from {mdfile}.")
+
+                # Recover fragments
+                fragments = []
+                with open(device, 'rb') as dev:
+                    for block, fragment_length, offset in metadata:
+                        # Seek to the correct position within the block
+                        dev.seek(block * chunk_size + offset)
+                        fragments.append(dev.read(fragment_length))
+
+                # Combine fragments
+                encrypted_data = b''.join(fragments)
+
+                # Decrypt the data
+                decrypted_data = self.cipher.decrypt(encrypted_data)
+
+                # Save the recovered file
+                with open(output_file, 'wb') as f:
+                    f.write(decrypted_data)
+                print(f"Recovered file saved to {output_file}.")
+                return True
+
+            
+        except FileNotFoundError:
+            print(f"Error: Metadata file '{mdfile}' not found.")
+            return None
+        except Exception as e:
+            print(f"Error decrypting metadata: {e}")
+            return None
+        
+
+
+    def f_recover_file(self, mdfile, output_file):
         """Reassemble the original file using metadata."""
         try:
             # Load metadata
-            with open(metadata_file, 'rb') as f:
+            with open(mdfile, 'rb') as f:
                 metadata = pickle.load(f)
-            print(f"Loaded metadata from {metadata_file}.")
+            print(f"Loaded metadata from {mdfile}.")
 
             # Recover fragments
             fragments = []
@@ -379,18 +517,42 @@ class FileFragmenter:
             # Save the recovered file
             with open(output_file, 'wb') as f:
                 f.write(decrypted_data)
-            print(f"Recovered file saved to {output_file}.")
+            print(f"Recovered file saved to {output_file}.")       
             return True
 
         except Exception as e:
             print(f"Error recovering file: {e}")
             return False
 
+class SecureMetadata:
+
+    @staticmethod
+    def decrypt_metadata(key, metadata_file):
+
+        try:
+            with open(metadata_file, 'rb') as f:
+                data = f.read()
+            
+            # Extract the nonce
+            nonce = data[:12] 
+            encrypted_data = data[12:]
+            aesgcm = AESGCM(key)
+            serialised_metadata = aesgcm.decrypt(nonce, encrypted_data, None)
+            return pickle.loads(serialised_metadata)
+        except FileNotFoundError:
+            print(f"Error: Metadata file '{metadata_file}' not found.")
+            return None
+        except Exception as e:
+            print(f"Error decrypting metadata: {e}")
+            return None
+
 
 if __name__ == '__main__':
     encryption_key = b'0VYu46sOkMtrmPCpwQlc7XfqKIy9_NWJGMoJNKhLzqs='
+    aes_key = b'\x1aFD\xafrF{\xfckM\x15\xa0\xc8\x82\x9d\xfe\x85f\x1f\x98\x98\xa2AdF9o\xe4r\xed\xb1\x07'
     storage_file = 'encrypted_storage.db'
     mdfile = "metadata.pkl"
+    chunk_size = 4
 
     layers = {
         'layer': '1',
@@ -398,10 +560,11 @@ if __name__ == '__main__':
     }
 
     master_password = getpass("Enter master password to mount filesystem: ")
-    correct_password = "CTF"
+    correct_password = "c"
 
     if master_password != correct_password:
         print("Incorrect password. Access denied.")
     else:
         mountpoint = '/tmp/fuse'
-        FUSE(PersistentEncryptedFS(storage_file, layers, encryption_key, mdfile), mountpoint, nothreads=True, foreground=True)
+        device = '/dev/sda1'
+        FUSE(PersistentEncryptedFS(storage_file, layers, encryption_key, mdfile, chunk_size, device, aes_key), mountpoint, nothreads=True, foreground=True)
