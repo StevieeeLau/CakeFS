@@ -1,7 +1,11 @@
 import os
-import errno
-import pickle
+import signal
 import sys
+import errno
+import atexit
+import pickle
+import random
+
 from fuse import FUSE, Operations, FuseOSError
 from getpass import getpass
 from cryptography.fernet import Fernet
@@ -9,12 +13,14 @@ from cryptography.fernet import Fernet
 class PersistentEncryptedFS(Operations):
     MAX_ATTEMPTS = 3  # Maximum allowed attempts before self-destruct
 
-    def __init__(self, storage_file, layers, encryption_key):
+    def __init__(self, storage_file, layers, encryption_key, mdfile):
         self.storage_file = storage_file
         self.layers = {}
         self.cipher = Fernet(encryption_key)
         self.authenticated_layers = set()  # Store authenticated layers in memory
+        self.fragmenter = FileFragmenter(storage_file, encryption_key)
         self._load_storage(layers)
+        atexit.register(self.fragment_file_and_exit)
 
         # Initialize each layer with a unique password if not loaded from storage
         for layer, password in layers.items():
@@ -26,8 +32,30 @@ class PersistentEncryptedFS(Operations):
                     'attempts': 0  # Track attempts for each layer
                 }
 
+    def fragment_file_and_exit(self):
+        """Fragment the encrypted file, delete it, and exit."""
+
+        self.fragmenter.execute('/')
+        # Securely delete the storage file
+        self.secure_delete(self.storage_file)
+        print("Cleanup complete. Exiting...")
+        sys.exit(0)
+
+    def secure_delete(self, file_path):
+        """Overwrite file with random data and delete it."""
+        if os.path.exists(file_path):
+            file_size = os.path.getsize(file_path)
+            with open(file_path, 'wb') as f:
+                f.write(os.urandom(file_size))
+            os.remove(file_path)
+            print(f"{file_path} securely deleted.")
+
     def _load_storage(self, defined_layers):
-        if os.path.exists(self.storage_file):
+        print("?")
+        if os.path.exists(mdfile):
+            
+            self.fragmenter.recover_file(mdfile, "encrypted_storage.db")
+
             with open(self.storage_file, 'rb') as f:
                 encrypted_data = f.read()
                 if encrypted_data:
@@ -226,10 +254,144 @@ class PersistentEncryptedFS(Operations):
 
     def lock(self, path, cmd, fh, lock_type):
         return 0
+    
+class FileFragmenter:
+    def __init__(self, storage_file, encryption_key):
+        self.storage_file = storage_file
+        self.cipher = Fernet(encryption_key)
+
+    def encrypt_file(self):
+        """Encrypt the storage file."""
+        with open(self.storage_file, 'rb') as f:
+            data = f.read()
+        encrypted_data = self.cipher.encrypt(data)
+        return encrypted_data
+
+    def fragment_file(self, encrypted_data, chunk_size=1024):
+        """Fragment the encrypted data into chunks."""
+        return [encrypted_data[i:i + chunk_size] for i in range(0, len(encrypted_data), chunk_size)]
+
+    def find_slack_spaces(self, root_path, min_size):
+        """Find files with slack space greater than or equal to min_size."""
+        slack_spaces = []
+        block_size = self.get_block_size(root_path)
+
+        for root, dirs, files in os.walk(root_path, followlinks=False):
+            for file in files:
+                path = os.path.join(root, file)
+                try:
+                    stats = os.stat(path)
+                    actual_size = stats.st_size
+                    allocated_size = (actual_size + block_size - 1) // block_size * block_size
+                    slack_space = allocated_size - actual_size
+                    if slack_space >= min_size:
+                        slack_spaces.append((path, slack_space))
+                except PermissionError:
+                    continue  # Skip files without permission
+                except FileNotFoundError:
+                    continue  # Skip dynamic files
+                except Exception as e:
+                    print(f"Error analyzing {path}: {e}")
+        return slack_spaces
+
+    def get_block_size(self, path):
+        """Get the block size of the file system."""
+        statvfs = os.statvfs(path)
+        return statvfs.f_bsize
+
+    def embed_fragments(self, fragments, slack_spaces):
+        """Embed fragments into slack spaces."""
+        metadata = []
+        random.shuffle(slack_spaces)  # Randomize order to increase difficulty for forensic analysis
+
+        for fragment in fragments:
+            if not slack_spaces:
+                raise ValueError("Not enough slack space available to embed all fragments.")
+            
+            # Find a file with sufficient slack space
+            for idx, (file_path, slack_space) in enumerate(slack_spaces):
+                if len(fragment) <= slack_space:
+                    try:
+                        with open(file_path, 'ab') as f:
+                            f.write(fragment)
+                        metadata.append((file_path, len(fragment)))
+                        slack_spaces.pop(idx)
+                        break
+                    except Exception as e:
+                        print(f"Error writing to {file_path}: {e}")
+                        continue
+            else:
+                raise ValueError("No slack space large enough for fragment.")
+
+        return metadata
+
+    def save_metadata(self, metadata, metadata_file="metadata.pkl"):
+        """Save metadata to reconstruct the fragments."""
+        with open(metadata_file, 'wb') as f:
+            pickle.dump(metadata, f)
+        print(f"Metadata saved to {metadata_file}.")
+
+    def execute(self, root_path):
+        """Encrypt, fragment, and embed the storage file."""
+        # Encrypt the file
+        print("Encrypting the storage file...")
+        encrypted_data = self.encrypt_file()
+
+        # Fragment the file
+        print("Fragmenting the encrypted file...")
+        fragments = self.fragment_file(encrypted_data)
+
+        # Find slack spaces
+        print("Finding suitable slack spaces...")
+        slack_spaces = self.find_slack_spaces(root_path, min(len(fragments[0]), 1024))
+
+        # Embed fragments
+        print("Embedding fragments into slack spaces...")
+        metadata = self.embed_fragments(fragments, slack_spaces)
+
+        # Save metadata
+        self.save_metadata(metadata)
+
+    def recover_file(self, metadata_file="metadata.pkl", output_file="recovered_file.db"):
+        """Reassemble the original file using metadata."""
+        try:
+            # Load metadata
+            with open(metadata_file, 'rb') as f:
+                metadata = pickle.load(f)
+            print(f"Loaded metadata from {metadata_file}.")
+
+            # Recover fragments
+            fragments = []
+            for file_path, fragment_length in metadata:
+                try:
+                    with open(file_path, 'rb') as f:
+                        f.seek(-fragment_length, os.SEEK_END)  # Read from the end
+                        fragments.append(f.read(fragment_length))
+                except Exception as e:
+                    print(f"Error reading fragment from {file_path}: {e}")
+                    return False
+
+            # Combine fragments
+            encrypted_data = b''.join(fragments)
+
+            # Decrypt the data
+            decrypted_data = self.cipher.decrypt(encrypted_data)
+
+            # Save the recovered file
+            with open(output_file, 'wb') as f:
+                f.write(decrypted_data)
+            print(f"Recovered file saved to {output_file}.")
+            return True
+
+        except Exception as e:
+            print(f"Error recovering file: {e}")
+            return False
+
 
 if __name__ == '__main__':
     encryption_key = b'0VYu46sOkMtrmPCpwQlc7XfqKIy9_NWJGMoJNKhLzqs='
     storage_file = 'encrypted_storage.db'
+    mdfile = "metadata.pkl"
 
     layers = {
         'layer': '1',
@@ -243,4 +405,4 @@ if __name__ == '__main__':
         print("Incorrect password. Access denied.")
     else:
         mountpoint = '/tmp/fuse'
-        FUSE(PersistentEncryptedFS(storage_file, layers, encryption_key), mountpoint, nothreads=True, foreground=True)
+        FUSE(PersistentEncryptedFS(storage_file, layers, encryption_key, mdfile), mountpoint, nothreads=True, foreground=True)
