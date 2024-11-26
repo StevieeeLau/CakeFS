@@ -146,17 +146,17 @@ class PersistentEncryptedFS(Operations):
                 os.remove(mdfile)
                 print(f"{mdfile} has been securely deleted.")
 
-            # Unmount the FUSE filesystem
-            print("Unmounting FUSE filesystem...")
-            subprocess.run(['fusermount', '-u', '/tmp/fuse'], check=True)  # Adjust `/tmp/fuse` to your mountpoint
-            print("FUSE filesystem unmounted.")
-
             # Self-delete this Python script
             script_path = __file__
             if os.path.exists(script_path):
                 os.remove(script_path)
                 print(f"Self-destruct sequence complete. {script_path} has been deleted.")
                 
+            # Unmount the FUSE filesystem
+            print("Unmounting FUSE filesystem...")
+            subprocess.run(['fusermount', '-u', '/tmp/fuse'], check=True)  # Adjust `/tmp/fuse` to your mountpoint
+            print("FUSE filesystem unmounted.")
+
             # Exit the process
             print("Exiting the application.")
             os._exit(1)  # Forcefully terminate the process to ensure no lingering threads
