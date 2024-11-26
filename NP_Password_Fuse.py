@@ -128,28 +128,43 @@ class PersistentEncryptedFS(Operations):
             raise FuseOSError(errno.ENOENT)
 
     def _self_destruct(self):
-        """Overwrites the storage file with random data and deletes it, then deletes this script."""
+        """Overwrites files, unmounts FUSE, and exits."""
         try:
             if os.path.exists(self.storage_file):
                 # Overwrite the storage file with random data
                 file_size = os.path.getsize(self.storage_file)
                 with open(self.storage_file, 'wb') as f:
-                    f.write(os.urandom(file_size))  # Write random bytes
-
-                # Delete the storage file
+                    f.write(os.urandom(file_size))
                 os.remove(self.storage_file)
                 print(f"{self.storage_file} has been securely deleted.")
+
+            if os.path.exists(mdfile):
+                # Overwrite the metadata file with random data
+                file_size = os.path.getsize(mdfile)
+                with open(mdfile, 'wb') as f:
+                    f.write(os.urandom(file_size))
+                os.remove(mdfile)
+                print(f"{mdfile} has been securely deleted.")
+
+            # Unmount the FUSE filesystem
+            print("Unmounting FUSE filesystem...")
+            subprocess.run(['fusermount', '-u', '/tmp/fuse'], check=True)  # Adjust `/tmp/fuse` to your mountpoint
+            print("FUSE filesystem unmounted.")
 
             # Self-delete this Python script
             script_path = __file__
             if os.path.exists(script_path):
                 os.remove(script_path)
                 print(f"Self-destruct sequence complete. {script_path} has been deleted.")
+                
+            # Exit the process
+            print("Exiting the application.")
+            os._exit(1)  # Forcefully terminate the process to ensure no lingering threads
 
-            sys.exit(1)  # Exit the program
         except Exception as e:
             print(f"Self-destruct failed: {e}")
-            sys.exit(1)
+            os._exit(1)  # Forcefully terminate even if there are errors
+
 
 
     def getattr(self, path, fh=None):
