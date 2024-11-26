@@ -51,7 +51,6 @@ class PersistentEncryptedFS(Operations):
             print(f"{file_path} securely deleted.")
 
     def _load_storage(self, defined_layers):
-        print("?")
         if os.path.exists(mdfile):
             
             self.fragmenter.recover_file(mdfile, "encrypted_storage.db")
@@ -267,7 +266,7 @@ class FileFragmenter:
         encrypted_data = self.cipher.encrypt(data)
         return encrypted_data
 
-    def fragment_file(self, encrypted_data, chunk_size=1024):
+    def fragment_file(self, encrypted_data, chunk_size=4):
         """Fragment the encrypted data into chunks."""
         return [encrypted_data[i:i + chunk_size] for i in range(0, len(encrypted_data), chunk_size)]
 
@@ -343,7 +342,7 @@ class FileFragmenter:
 
         # Find slack spaces
         print("Finding suitable slack spaces...")
-        slack_spaces = self.find_slack_spaces(root_path, min(len(fragments[0]), 1024))
+        slack_spaces = self.find_slack_spaces(root_path, min(len(fragments[0]), 4))
 
         # Embed fragments
         print("Embedding fragments into slack spaces...")
