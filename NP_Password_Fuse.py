@@ -452,7 +452,7 @@ class FileFragmenter:
 
         # Find unused blocks
         print("Finding unused blocks...")
-        unused_blocks = self.find_unused_blocks("/dev/sda1")
+        unused_blocks = self.find_unused_blocks(device)
 
         # Find slack spaces
         #print("Finding suitable slack spaces...")
