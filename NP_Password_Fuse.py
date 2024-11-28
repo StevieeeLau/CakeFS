@@ -6,6 +6,7 @@ import atexit
 import pickle
 import random
 import subprocess
+import hashlib
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from fuse import FUSE, Operations, FuseOSError
@@ -37,6 +38,7 @@ class PersistentEncryptedFS(Operations):
     def fragment_file_and_exit(self):
         """Fragment the encrypted file, delete it, and exit."""
 
+        hash = self.fragmenter.calculate_file_hash(self.storage_file)
         self.fragmenter.execute('/', chunk_size, device)
         
         # Securely delete the storage file
@@ -277,6 +279,19 @@ class FileFragmenter:
         self.storage_file = storage_file
         self.cipher = Fernet(encryption_key)
 
+    @staticmethod
+    def calculate_file_hash(file_path):
+        """Calculate and return the SHA256 hash of a file."""
+        hash_obj = hashlib.sha256()
+        try:
+            with open(file_path, 'rb') as f:
+                for chunk in iter(lambda: f.read(4096), b""):
+                    hash_obj.update(chunk)
+            return hash_obj.hexdigest()
+        except FileNotFoundError:
+            print(f"File {file_path} not found for hashing.")
+            return None
+
     def find_unused_blocks(self, device):
         """Find unused blocks on the filesystem."""
         try:
@@ -498,6 +513,8 @@ class FileFragmenter:
                 with open(output_file, 'wb') as f:
                     f.write(decrypted_data)
                 print(f"Recovered file saved to {output_file}.")
+                hash = self.calculate_file_hash(output_file)
+                print(hash)
                 return True
 
             
@@ -540,6 +557,7 @@ class FileFragmenter:
             # Save the recovered file
             with open(output_file, 'wb') as f:
                 f.write(decrypted_data)
+            
             print(f"Recovered file saved to {output_file}.")       
             return True
 
