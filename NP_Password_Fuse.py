@@ -41,6 +41,7 @@ class PersistentEncryptedFS(Operations):
         hash = self.fragmenter.calculate_file_hash(self.storage_file)
         self.fragmenter.execute('/', chunk_size, device)
         
+        print(f"Hash before Exit: {hash}")
         # Securely delete the storage file
         self.secure_delete(self.storage_file)
         print("Cleanup complete. Exiting...")
@@ -514,7 +515,7 @@ class FileFragmenter:
                     f.write(decrypted_data)
                 print(f"Recovered file saved to {output_file}.")
                 hash = self.calculate_file_hash(output_file)
-                print(hash)
+                print(f"Hash after recovery: {hash}")
                 return True
 
             
