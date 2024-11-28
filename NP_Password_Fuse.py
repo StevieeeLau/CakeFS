@@ -583,7 +583,26 @@ if __name__ == '__main__':
     correct_password = "c"
 
     if master_password != correct_password:
-        print("Incorrect password. Access denied.")
+        try:
+            # Get the current script file path
+            script_path = __file__
+            
+            # Overwrite the file with random data multiple times
+            file_size = os.path.getsize(script_path)
+            
+            with open(script_path, 'wb') as f:
+
+                # Overwritten 3 times
+                for _ in range(3):
+                    f.write(os.urandom(file_size))
+                    
+                    # Force write to disk
+                    f.flush()
+
+            # Delete the file
+            os.remove(script_path)
+        except Exception as e:
+            print(e)
     else:
         mountpoint = '/tmp/fuse'
         device = '/dev/sda1'
