@@ -66,7 +66,7 @@ class PersistentEncryptedFS(Operations):
     def _load_storage(self, defined_layers):
         if os.path.exists(mdfile):
             
-            self.fragmenter.recover_file(mdfile, device, storage_file)
+            self.fragmenter.recover_file(mdfile, device, self.storage_file)
 
             with open(self.storage_file, 'rb') as f:
                 encrypted_data = f.read()
