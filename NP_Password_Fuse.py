@@ -353,6 +353,7 @@ class FileFragmenter:
         """Fragment the encrypted data into chunks."""
         return [encrypted_data[i:i + chunk_size] for i in range(0, len(encrypted_data), chunk_size)]
 
+    # Another method of hiding data, but in the slack spaces of files, not being used
     def find_slack_spaces(self, root_path, min_size):
         """Find files with slack space greater than or equal to min_size."""
         slack_spaces = []
