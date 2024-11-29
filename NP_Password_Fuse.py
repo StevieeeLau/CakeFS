@@ -14,13 +14,17 @@ from getpass import getpass
 from cryptography.fernet import Fernet
 
 class PersistentEncryptedFS(Operations):
-    MAX_ATTEMPTS = 3  # Maximum allowed attempts before self-destruct
 
-    def __init__(self, storage_file, layers, encryption_key, mdfile, chunk_size, device, aes_key):
+    # Maximum allowed attempts before attempted self-destruct
+    MAX_ATTEMPTS = 3
+
+    def __init__(self, storage_file, layers, encryption_key, mdfile, chunk_size, device, aes_key, mountpoint):
         self.storage_file = storage_file
         self.layers = {}
         self.cipher = Fernet(encryption_key)
-        self.authenticated_layers = set()  # Store authenticated layers in memory
+
+        # Store authenticated layers in memory
+        self.authenticated_layers = set()
         self.fragmenter = FileFragmenter(storage_file, encryption_key, chunk_size, aes_key)
         self._load_storage(layers)
         atexit.register(self.fragment_file_and_exit)
@@ -32,7 +36,9 @@ class PersistentEncryptedFS(Operations):
                     'password': password,
                     'files': {},
                     'data': {},
-                    'attempts': 0  # Track attempts for each layer
+                    
+                    # Track attempts for each layer
+                    'attempts': 0
                 }
 
     def fragment_file_and_exit(self):
@@ -42,6 +48,7 @@ class PersistentEncryptedFS(Operations):
         self.fragmenter.execute('/', chunk_size, device)
         
         print(f"Hash before Exit: {hash}")
+
         # Securely delete the storage file
         self.secure_delete(self.storage_file)
         print("Cleanup complete. Exiting...")
@@ -73,7 +80,9 @@ class PersistentEncryptedFS(Operations):
                             print(f"Removing undefined layer: {layer}")
                             del loaded_layers[layer]
                         else:
-                            loaded_layers[layer].setdefault('attempts', 0)  # Ensure attempts are loaded
+
+                            # Ensure attempts are loaded
+                            loaded_layers[layer].setdefault('attempts', 0)
 
                     self.layers = loaded_layers
                     self._save_storage()
@@ -85,6 +94,7 @@ class PersistentEncryptedFS(Operations):
             f.write(encrypted_data)
 
     def _authenticate(self, layer):
+
         # Check if the layer is already authenticated in this session
         if layer in self.authenticated_layers:
             return True
@@ -97,11 +107,15 @@ class PersistentEncryptedFS(Operations):
         # Prompt for the password and validate it
         password = getpass(f"Enter password for {layer}: ")
         if password == self.layers[layer]['password']:
+
             # Only add to authenticated layers when the correct password is entered
             self.authenticated_layers.add(layer)
-            self.layers[layer]['attempts'] = 0  # Reset attempts on success
+
+            # Reset attempts on success
+            self.layers[layer]['attempts'] = 0
             return True
         else:
+
             # Increment failed attempts and save to persist across sessions
             self.layers[layer]['attempts'] += 1
             self._save_storage()
@@ -123,8 +137,10 @@ class PersistentEncryptedFS(Operations):
     def readdir(self, path, fh):
         layer = path.split('/')[1] if '/' in path else None
         if layer in self.layers:
+
             # Check if authenticated before accessing the layer
-            self._authenticate(layer)  # This will only prompt for a password once per session per layer
+            # This will only prompt for a password once per session per layer
+            self._authenticate(layer)
             files = self.layers[layer]['files']
             return ['.', '..'] + [x.split('/')[-1] for x in files]
         else:
@@ -134,6 +150,7 @@ class PersistentEncryptedFS(Operations):
         """Overwrites files, unmounts FUSE, and exits."""
         try:
             if os.path.exists(self.storage_file):
+
                 # Overwrite the storage file with random data
                 file_size = os.path.getsize(self.storage_file)
                 with open(self.storage_file, 'wb') as f:
@@ -142,6 +159,7 @@ class PersistentEncryptedFS(Operations):
                 print(f"{self.storage_file} has been securely deleted.")
 
             if os.path.exists(mdfile):
+
                 # Overwrite the metadata file with random data
                 file_size = os.path.getsize(mdfile)
                 with open(mdfile, 'wb') as f:
@@ -157,39 +175,19 @@ class PersistentEncryptedFS(Operations):
                 
             # Unmount the FUSE filesystem
             print("Unmounting FUSE filesystem...")
-            subprocess.run(['fusermount', '-u', '/tmp/fuse'], check=True)  # Adjust `/tmp/fuse` to your mountpoint
+            subprocess.run(['fusermount', '-u', mountpoint], check=True)
             print("FUSE filesystem unmounted.")
 
             # Exit the process
             print("Exiting the application.")
-            os._exit(1)  # Forcefully terminate the process to ensure no lingering threads
+
+            # Forcefully terminate the process to ensure no lingering threads
+            os._exit(1)
 
         except Exception as e:
             print(f"Self-destruct failed: {e}")
-            os._exit(1)  # Forcefully terminate even if there are errors
-
-
-
-    def getattr(self, path, fh=None):
-        layer = path.split('/')[1] if '/' in path else None
-        if not layer or layer not in self.layers:
-            raise FuseOSError(errno.ENOENT)
-        if path == '/' or path == f'/{layer}':
-            return dict(st_mode=(0o755 | 0o040000), st_nlink=2, st_size=0)
-        files = self.layers[layer]['files']
-        if path in files:
-            return files[path]
-        else:
-            raise FuseOSError(errno.ENOENT)
-
-    def readdir(self, path, fh):
-        layer = path.split('/')[1] if '/' in path else None
-        if layer in self.layers:
-            self._authenticate(layer)  # Authenticate layer if not already done
-            files = self.layers[layer]['files']
-            return ['.', '..'] + [x.split('/')[-1] for x in files]
-        else:
-            raise FuseOSError(errno.ENOENT)
+            # Forcefully terminate even if there are errors
+            os._exit(1)
 
     def create(self, path, mode):
         layer = path.split('/')[1] if '/' in path else None
@@ -257,6 +255,7 @@ class PersistentEncryptedFS(Operations):
     def ftruncate(self, path, length, fh=None):
         self.truncate(path, length, fh)
 
+    # Incase called by commands
     def unlink(self, path):
         layer = path.split('/')[1] if '/' in path else None
         if layer in self.layers:
@@ -296,7 +295,9 @@ class FileFragmenter:
     def find_unused_blocks(self, device):
         """Find unused blocks on the filesystem."""
         try:
+
             # Run dumpe2fs and capture the output for 'Free blocks:'
+
             command = f"sudo dumpe2fs {device} | grep 'Free blocks:'"
             process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             stdout, stderr = process.communicate()
@@ -309,14 +310,18 @@ class FileFragmenter:
             free_blocks = []
             for line in stdout.splitlines():
                 if "Free blocks:" in line:
+
                     # Extract the portion after "Free blocks:"
                     ranges = line.split("Free blocks:")[1].strip().split(", ")
                     for block_range in ranges:
-                        if not block_range.strip():  # Skip empty strings
+
+                        # Skip empty strings
+                        if not block_range.strip():
                             continue
                         if "-" in block_range:
                             try:
-                                # Handle ranges (e.g., "16875520-16875946")
+
+                                # Handle ranges
                                 start, end = map(int, block_range.split("-"))
                                 free_blocks.extend(range(start, end + 1))
                             except ValueError as e:
@@ -324,7 +329,8 @@ class FileFragmenter:
                                 continue
                         else:
                             try:
-                                # Handle single blocks (e.g., "16876064")
+
+                                # Handle single blocks
                                 free_blocks.append(int(block_range))
                             except ValueError as e:
                                 print(f"Error processing block '{block_range}': {e}")
@@ -362,9 +368,11 @@ class FileFragmenter:
                     if slack_space >= min_size:
                         slack_spaces.append((path, slack_space))
                 except PermissionError:
+
                     # Skip files without permission
                     continue
                 except FileNotFoundError:
+
                     # Skip dynamic files
                     continue
                 except Exception as e:
@@ -411,6 +419,7 @@ class FileFragmenter:
             print(f"Error writing fragments to unused blocks: {e}")
         return metadata
 
+    # Not being used, is the code to store fragments in file slack space
     def f_embed_fragments(self, fragments, slack_spaces):
         """Embed fragments into slack spaces."""
         metadata = []
@@ -470,6 +479,7 @@ class FileFragmenter:
         print("Finding unused blocks...")
         unused_blocks = self.find_unused_blocks(device)
 
+        # Commented out trigger code for locating slack space in files
         # Find slack spaces
         #print("Finding suitable slack spaces...")
         #slack_spaces = self.find_slack_spaces(root_path, min(len(fragments[0]), chunk_size))
@@ -527,7 +537,7 @@ class FileFragmenter:
             return None
         
 
-    # Temp not being used
+    # Temp not being used, is the code for finding metadata stored in files
     def f_recover_file(self, mdfile, output_file):
         """Reassemble the original file using metadata."""
         try:
@@ -575,68 +585,9 @@ if __name__ == '__main__':
     chunk_size = 4
 
     layers = {
-    'skyfall': 'eaglesoarhigh',
-    'sunshine': 'brighteveryday',
-    'moondust': 'nightsparkling',
-    'rivers': 'flowfreely',
-    'mountain': 'standtall',
-    'forest': 'deepandgreen',
-    'clouds': 'driftingaway',
-    'ocean': 'vastandblue',
-    'desert': 'endlesssand',
-    'thunder': 'stormyweather',
-    'raindrop': 'fallsquietly',
-    'iceberg': 'hiddenbeneath',
-    'volcano': 'eruptionfire',
-    'galaxy': 'starsunseen',
-    'comet': 'trailoflight',
-    'webare': 'withu',
-    'nebula': 'cosmiccloud',
-    'gravity': 'pulltogether',
-    'quantum': 'smallestrealm',
-    'horizon': 'farawayline',
-    'island': 'solitudepeace',
-    'windmill': 'turnforever',
-    'starlight': 'guidingpath',
-    'heartbeat': 'lifesrhythm',
-    'sandstorm': 'blindingwind',
-    'tornado': 'spiralforce',
-    'snowfall': 'frostymagic',
-    'aurora': 'polarcolors',
-    'whirlpool': 'currentspull',
-    'meadow': 'calmserenity',
-    'wildfire': 'untamedflame',
-    'rainforest': 'livelygreen',
-    'canyon': 'deepandvast',
-    'tidalwave': 'shoreimpact',
-    'waterfall': 'naturecascade',
-    'skylark': 'soaringbird',
-    'glacier': 'frozenriver',
-    'sequoia': 'toweringtree',
-    'rainbow': 'colorarch',
-    'sunset': 'goldenhue',
-    'dawn': 'freshstart',
-    'twilight': 'eveningglow',
-    'midnight': 'silenthours',
-    'whisper': 'secretheard',
-    'echo': 'soundreturns',
-    'mirage': 'illusionsight',
-    'frost': 'coldandsharp',
-    'ember': 'burningcoal',
-    'webare': 'withu',
-    'dunes': 'shiftingland',
-    'lagoon': 'hiddenwater',
-    'rapids': 'rushingwater',
-    'blizzard': 'snowstorm',
-    'quicksand': 'sinkslowly',
-    'pebble': 'smallsmoothrock',
-    'drizzle': 'lightshower',
-    'typhoon': 'ragingstorm',
-    'harbor': 'safehaven',
-    'geyser': 'hotwaterrise',
-    'tidalpool': 'watercircle'
-}
-
+        'layer': '1',
+        'layer1': '2',
+    }
 
     master_password = getpass("Enter master password to mount filesystem: ")
     correct_password = "c"
@@ -665,4 +616,4 @@ if __name__ == '__main__':
     else:
         mountpoint = '/tmp/fuse'
         device = '/dev/sda1'
-        FUSE(PersistentEncryptedFS(storage_file, layers, encryption_key, mdfile, chunk_size, device, aes_key), mountpoint, nothreads=True, foreground=True)
+        FUSE(PersistentEncryptedFS(storage_file, layers, encryption_key, mdfile, chunk_size, device, aes_key, mountpoint), mountpoint, nothreads=True, foreground=True)
