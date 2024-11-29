@@ -252,10 +252,10 @@ class PersistentEncryptedFS(Operations):
         else:
             raise FuseOSError(errno.ENOENT)
 
+    # Incase called by commands
     def ftruncate(self, path, length, fh=None):
         self.truncate(path, length, fh)
 
-    # Incase called by commands
     def unlink(self, path):
         layer = path.split('/')[1] if '/' in path else None
         if layer in self.layers:
@@ -271,6 +271,7 @@ class PersistentEncryptedFS(Operations):
         else:
             raise FuseOSError(errno.ENOENT)
 
+    # Not really used, meant to be for locking files
     def lock(self, path, cmd, fh, lock_type):
         return 0
     
